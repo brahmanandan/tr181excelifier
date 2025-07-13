@@ -27,7 +27,7 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.styles import PatternFill, Border, Side, Alignment, Protection, Font
 
 
-def get_params(obj: Element) -> Tuple[str,str,str]:
+def get_params(obj: Element) -> Tuple[str, str, str, str, str]:
     """Parses parameters from management object
 
     Arguments:
@@ -56,7 +56,7 @@ def get_params(obj: Element) -> Tuple[str,str,str]:
                 prev = "{} {:<8} ".format(prev, optional)
         return prev
 
-    def add_syntax(prev: str, desc: str) -> Tuple[str,str]:
+    def add_syntax(prev: str, desc: str) -> Tuple[str, str, str, str]:
         """Adds information from syntax tag containing parameter type information
 
         Arguments:
@@ -66,21 +66,29 @@ def get_params(obj: Element) -> Tuple[str,str,str]:
         Returns:
             str -- Constructed string
             desc -- Description string with potential replacements
+            str -- Data type
+            str -- Range
         """
         syntax = obj.find('syntax')
-        if syntax:
+        data_type = ""
+        range_str = ""
+        if syntax is not None:
             syntax_text = ""
             param_type = syntax.find('boolean')
 
-            if not param_type:
+            if param_type is None:
                 param_type = syntax.find('string')
 
-                if not param_type:
+                if param_type is None:
                     # We'll take the first item (this is kind of ugly as relies into ordering)
                     param_type = list(syntax)
                     if param_type:
                         param_type = param_type[0]
+                        data_type = param_type.tag
                         syntax_text = param_type.tag
+                        range_element = param_type.find('range')
+                        if range_element is not None:
+                            range_str = f"{range_element.get('min')}-{range_element.get('max')}"
                         units_tag = param_type.find('units')
 
                         if units_tag is not None:
@@ -94,6 +102,7 @@ def get_params(obj: Element) -> Tuple[str,str,str]:
                         pass
 
                 else:
+                    data_type = 'string'
                     # String parameter processing
                     enum_type = param_type.findall('enumeration')
                     if enum_type:
@@ -101,19 +110,20 @@ def get_params(obj: Element) -> Tuple[str,str,str]:
                     else:
                         param_type = param_type.find('size')
 
-                        if param_type:
+                        if param_type is not None:
                             syntax_text = "max length " + param_type.get('maxLength')
 
                         prev = f"{prev} String{syntax_text}"
 
             else:
+                data_type = 'boolean'
                 prev = f"{prev} Boolean"
 
             param_type = syntax.find('default')
-            if param_type:
+            if param_type is not None:
                 prev = "{} {}".format(prev,param_type.text)
 
-        return prev, desc
+        return prev, desc, data_type, range_str
 
     desc = obj.find('description').text
 
@@ -121,12 +131,14 @@ def get_params(obj: Element) -> Tuple[str,str,str]:
     text = add_optionals(text, 'status')
     text = add_optionals(text, 'activeNotify')
     text = add_optionals(text, 'forcedInform')
-    (text, desc) = add_syntax(text, desc)
+    (text, desc, data_type, range_str) = add_syntax(text, desc)
 
     return (
         obj.get('name'),
         obj.get('access'),
-        f"{text} {desc}"
+        f"{text} {desc}",
+        data_type,
+        range_str
     )
 
 def parse_object(obj: Element) -> List[Dict[str, str]]:
@@ -140,28 +152,37 @@ def parse_object(obj: Element) -> List[Dict[str, str]]:
     """
     combined = []
 
+    description_element = obj.find('description')
+    description = ""
+    if description_element is not None and description_element.text is not None:
+        description = re.sub(' +', ' ', description_element.text)
+
     params = obj.findall('parameter')
-    if params:
+    if params is not None:
         for param in params:
-            (name, access, desc) = get_params(param)
+            (name, access, desc, data_type, range_str) = get_params(param)
 
             combined.append({
                 'Object' : obj.get('name'),
                 'Access': obj.get('access'),
-                'Description': re.sub(' +', ' ', obj.find('description').text),
+                'Description': description,
                 'Parameter': name,
                 'Parameter Access': access,
-                'Parameter Description' : desc
+                'Parameter Description' : desc,
+                'Data Type': data_type,
+                'Range': range_str
             })
     else:
         # We can end up here in hierarchical objects
         combined.append({
             'Object' : obj.get('name'),
             'Access': obj.get('access'),
-            'Description': re.sub(' +', ' ', obj.find('description').text),
+            'Description': description,
             'Parameter': "",
             'Parameter Access': "",
-            'Parameter Description' : ""
+            'Parameter Description' : "",
+            'Data Type': "",
+            'Range': ""
         })
 
     return combined
@@ -203,7 +224,7 @@ def parse_profile(obj: Element, profile: Element) -> Dict[str,str]:
     }
 
     params = obj.findall('parameter')
-    if params:
+    if params is not None:
         obj_dict['Parameters'] = "\n".join([get_profile_params(param) for param in params])
 
     return obj_dict
@@ -278,7 +299,7 @@ def clean_model(model: pd.DataFrame) -> pd.DataFrame:
 
     # This is pretty heavy and done for each item. We maybe able to remove this as most the undesired characters are
     # in the description parts
-    model = model.applymap(process_text)
+    model = model.map(process_text)
 
     model['Parameter Description'] = model.apply(lambda x: map_params(x,'Parameter Description'), axis=1)
     model['Description'] = model.apply(lambda x: map_params(x,'Description'), axis=1)
@@ -317,7 +338,7 @@ def parse_model(filename: str, output: str):
     ws_model.title = "Model"
     ws_profile = wb.create_sheet("Profiles")
 
-    build_sheet(ws_model, df_model, ['C', 'D', 'E'])
+    build_sheet(ws_model, df_model, ['C', 'D', 'E', 'F', 'G'])
     build_sheet(ws_profile, df_profile, ['F'])
 
     # Performing cell merges where applicable
@@ -331,7 +352,9 @@ def parse_model(filename: str, output: str):
     ws_model.column_dimensions['C'].width=40.0
     ws_model.column_dimensions['D'].width=45.0
     ws_model.column_dimensions['E'].width=15.0
-    ws_model.column_dimensions['F'].width=400.0
+    ws_model.column_dimensions['F'].width=15.0
+    ws_model.column_dimensions['G'].width=15.0
+    ws_model.column_dimensions['H'].width=400.0
 
     ws_profile.column_dimensions['A'].width=25.0
     ws_profile.column_dimensions['B'].width=50.0
